@@ -34,11 +34,14 @@ class Router:
         inference: InferenceService,
         pager: Optional[PagerClient] = None,
         dry_run_pager: bool = False,
+        db
     ) -> None:
         self.history = history
         self.inference = inference
         self.pager = pager
         self.dry_run_pager = dry_run_pager
+        #db addition
+        self.db = db
 
         self.patients: Dict[str, PatientState] = {}
         self.paged: Set[Tuple[str, str]] = set()  # (mrn, test_time_hl7)
@@ -53,6 +56,7 @@ class Router:
         except hl7.HL7ParseError as e:
             log.warning("parse_error: %s", e)
             return "AE"
+        
 
         # Unknown message type: accept (avoid resend loops), ignore content.
         if isinstance(ev, hl7.UnknownEvent):
@@ -60,50 +64,77 @@ class Router:
             return "AA"
 
         if isinstance(ev, hl7.AdmitEvent):
-            ps = self._get_patient(ev.mrn)
-            # DOB in HL7 admits is PID.7 format YYYYMMDD
-            ps.demographics = Demographics(dob_yyyymmdd=ev.dob, sex=ev.sex)
-            ps.admitted = True
+            self.db.update_patient(
+                ev.mrn, 
+                is_admitted=True, 
+                dob=ev.dob, 
+                sex=ev.sex, 
+                admit_time=ev.msg_time
+            )
             return "AA"
 
         if isinstance(ev, hl7.DischargeEvent):
-            ps = self._get_patient(ev.mrn)
-            ps.admitted = False
+            self.db.update_patient(
+                ev.mrn, 
+                is_admitted=False, 
+                discharge_time=ev.msg_time
+            )
             return "AA"
 
         if isinstance(ev, hl7.CreatinineEvent):
-            # Update history
-            self.history.add_creatinine(ev.mrn, ev.test_time, ev.value)
-            ph = self.history.get(ev.mrn)
-            ps = self._get_patient(ev.mrn)
 
-            # Build history list INCLUDING this test (already appended)
-            history_ord_vals = ph.creatinine
+            is_new = self.db.insert_lab(ev.mrn, ev.test_time, ev.value)
+            if not is_new:
+                log.info("Duplicate lab received for MRN %s at %s; skipping inference.", ev.mrn, ev.test_time)
+                return "AA"
+            
+            # 2. Fetch history and state from DB
+            history_ord_vals = self.history.get_history_from_db(ev.mrn)
+            ps_dict = self.db.get_patient_state(ev.mrn)
+            
+            # Map DB dict to Demographics object for the model
+            demo = None
+            if ps_dict and ps_dict['dob']:
+                demo = Demographics(dob_yyyymmdd=ps_dict['dob'], sex=ps_dict['sex'])
 
+            # 3. Predict
             should_page = self.inference.predict_aki(
                 mrn=ev.mrn,
                 test_time_hl7=ev.test_time,
                 history_ord_vals=history_ord_vals,
-                demographics=ps.demographics,
+                demographics=demo,
             )
 
-            # suppress if definitely discharged
-            if ps.admitted is False:
+            # 4. Suppress if discharged
+            if ps_dict and ps_dict['is_admitted'] == 0:
+                log.info("Suppressed alert for MRN %s (Discharged)", ev.mrn)
                 should_page = False
 
             if should_page:
-                key = (ev.mrn, ev.test_time)
-                if key not in self.paged:
-                    self.paged.add(key)
-                    if self.pager and not self.dry_run_pager:
-                        ok, info = self.pager.send_page(ev.mrn, ev.test_time)
-                        if ok:
-                            log.info("paged %s,%s", ev.mrn, ev.test_time)
-                        else:
-                            log.warning("page_failed %s,%s: %s", ev.mrn, ev.test_time, info)
-                    else:
-                        log.info("dry_paged %s,%s", ev.mrn, ev.test_time)
+                import time
+                current_ts = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+                
+                # Initialize alert with status 'pending' before trying to send
+                self.db.update_alert(ev.mrn, ev.test_time, "pending")
+                
+                if self.pager and not self.dry_run_pager:
+                    ok, info = self.pager.send_page(ev.mrn, ev.test_time)
+                    status = "sent" if ok else "failed"
+                    
+                    # Log the attempt and update the status in SQL
+                    with self.db._get_conn() as conn:
+                        conn.execute("""
+                            UPDATE alerts 
+                            SET status = ?, attempt_count = attempt_count + 1, last_attempt_time = ?
+                            WHERE mrn = ? AND test_time = ?
+                        """, (status, current_ts, ev.mrn, ev.test_time))
+                        conn.commit()
+                    
+                    log.info("PAGED MRN %s: %s (Attempt 1)", ev.mrn, info)
+                else:
+                    # In dry-run mode, we mark as sent but don't increment attempt counts the same way
+                    self.db.update_alert(ev.mrn, ev.test_time, "sent")
+                    log.info("DRY-RUN PAGE for MRN %s (Test Time: %s)", ev.mrn, ev.test_time)
+            
             return "AA"
-
-        # default accept
         return "AA"
