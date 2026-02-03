@@ -74,13 +74,6 @@ class Database:
             ).fetchall()
             return [(row["test_time"], row["value"]) for row in rows]
 
-    # def update_alert(self, mrn: str, test_time: str, status: str):
-    #     """Durable alert tracking: pending -> sent/failed ."""
-    #     with self._get_conn() as conn:
-    #         conn.execute("""
-    #             INSERT INTO alerts (mrn, test_time, status) VALUES (?, ?, ?)
-    #             ON CONFLICT(mrn, test_time) DO UPDATE SET status=excluded.status
-    #         """, (mrn, test_time, status))
     def update_alert(self, mrn: str, test_time: str, status: str):
         """
         Durable alert tracking. 
@@ -95,17 +88,6 @@ class Database:
                 ON CONFLICT(mrn, test_time) DO UPDATE SET status=excluded.status
             """, (mrn, test_time, status))
     
-    # def update_patient(self, mrn: str, is_admitted: bool, dob: str = None, sex: str = None):
-    #     """Updates or inserts patient admission and demographic state."""
-    #     with self._get_conn() as conn:
-    #         conn.execute("""
-    #             INSERT INTO patients (mrn, is_admitted, dob, sex) 
-    #             VALUES (?, ?, ?, ?)
-    #             ON CONFLICT(mrn) DO UPDATE SET 
-    #                 is_admitted=excluded.is_admitted,
-    #                 dob=COALESCE(excluded.dob, dob),
-    #                 sex=COALESCE(excluded.sex, sex)
-    #         """, (mrn, int(is_admitted), dob, sex))
     def update_patient(self, mrn: str, is_admitted: bool, dob: str = None, sex: str = None, 
                        admit_time: str = None, discharge_time: str = None):
         """Updates or inserts patient admission, demographics, and visit timestamps."""
@@ -126,18 +108,6 @@ class Database:
         with self._get_conn() as conn:
             row = conn.execute("SELECT * FROM patients WHERE mrn = ?", (mrn,)).fetchone()
             return dict(row) if row else None
-
-    # def retry_failed_alerts(self, pager: PagerClient) -> int:
-    #     """Startup recovery: attempts to resend alerts marked 'failed'."""
-    #     count = 0
-    #     with self._get_conn() as conn:
-    #         failed = conn.execute("SELECT mrn, test_time FROM alerts WHERE status = 'failed'").fetchall()
-    #         for row in failed:
-    #             ok, _ = pager.send_page(row["mrn"], row["test_time"])
-    #             if ok:
-    #                 self.update_alert(row["mrn"], row["test_time"], "sent")
-    #                 count += 1
-    #     return count
 
     def retry_failed_alerts(self, pager: PagerClient) -> int:
         count = 0
