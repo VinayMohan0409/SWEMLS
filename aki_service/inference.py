@@ -69,4 +69,7 @@ class InferenceService:
         with torch.no_grad():
             logit = self.bundle.model(vals, times, mask, age, sex_t)
             prob = torch.sigmoid(logit).item()
-        return prob >= float(self.bundle.threshold)
+        
+        result = prob >= float(self.bundle.threshold)
+        print(f"MRN: {mrn} | Prediction: {result} | Probability: {prob:.4f}")
+        return result

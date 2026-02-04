@@ -22,46 +22,38 @@ class HistoryStore:
     without changing parsing and inference layers.
     """
 
-    def __init__(self) -> None:
-        self._h: Dict[str, PatientHistory] = {}
-
-    def get(self, mrn: str) -> PatientHistory:
-        return self._h.setdefault(mrn, PatientHistory(creatinine=[]))
-
-    def add_creatinine(self, mrn: str, date_any: str, value: float) -> None:
-        d = date_to_ordinal_from_any(date_any)
-        if d is None:
-            return
-        ph = self.get(mrn)
-        ph.creatinine.append((d, float(value)))
-
+    def __init__(self, db) -> None:
+        # db connection
+        self.db = db 
+    
     def load_history_csv(self, path: str) -> int:
-        p = Path(path)
-        if not p.exists():
-            return 0
-        n = 0
-        with p.open("r", newline="") as f:
-            r = csv.DictReader(f)
-            for row in r:
-                mrn = (row.get("mrn") or "").strip()
-                if not mrn:
-                    continue
-                # collect all creatinine_date_k/result_k pairs
-                for k in range(0, 10_000):
-                    dk = f"creatinine_date_{k}"
-                    vk = f"creatinine_result_{k}"
-                    if dk not in row and vk not in row:
-                        # assume contiguous indices; break early
-                        if k > 0:
-                            break
-                    d = (row.get(dk) or "").strip()
-                    v = (row.get(vk) or "").strip()
-                    if not d or not v:
-                        continue
-                    try:
-                        vf = float(v)
-                    except ValueError:
-                        continue
-                    self.add_creatinine(mrn, d, vf)
-                n += 1
-        return n
+            p = Path(path)
+            if not p.exists():
+                return 0
+                
+            # Updated check: Just try to get any history from a known MRN or check labs count
+            # For simplicity, we can let the SQL 'INSERT OR IGNORE' handles duplicates, 
+            # but to follow your 'Optimization' logic:
+            # Use a simple query to see if the table is already populated.
+            
+            n = 0
+            with p.open("r", newline="") as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    mrn = row["mrn"].strip()
+                    # Unpivot the wide format 
+                    for k in range(26):
+                        date_key = f"creatinine_date_{k}"
+                        res_key = f"creatinine_result_{k}"
+                        
+                        if date_key in row and row[date_key] and row[res_key]:
+                            # insert_lab already handles duplicates via IntegrityError
+                            if self.db.insert_lab(mrn, row[date_key], float(row[res_key])):
+                                n += 1
+            return n
+    
+    def get_history_from_db(self, mrn: str) -> List[Tuple[int, float]]:
+        """Fetches labs from DB and converts dates to ordinals for the model."""
+        raw_history = self.db.get_history(mrn)
+        # Convert the ISO/HL7 string from DB to the ordinal integer the model expects
+        return [(date_to_ordinal_from_any(ts), val) for ts, val in raw_history]

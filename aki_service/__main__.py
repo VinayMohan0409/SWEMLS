@@ -12,6 +12,7 @@ from .inference import InferenceService
 from .mllp import MLLPClient
 from .pager import PagerClient
 from .router import Router
+from .db import Database
 
 
 def parse_hostport(s: str) -> Tuple[str, int]:
@@ -30,10 +31,17 @@ def main() -> None:
     ap.add_argument("--device", default=os.environ.get("AKI_DEVICE", "cpu"), help="torch device (cpu)")
     ap.add_argument("--dry-run-pager", action="store_true", help="Do not send POSTs to pager (log only)")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
+    ap.add_argument("--db", default=os.environ.get("DB_PATH", "aki_service.db"), help="Path to SQLite database")
     args = ap.parse_args()
 
-    logging.basicConfig(level=getattr(logging, args.log_level.upper(), logging.INFO), format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    logging.basicConfig(
+    level=getattr(logging, args.log_level.upper(), logging.INFO), 
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
     log = logging.getLogger("aki_service")
+
+    # 1. Initialize the Database
+    db = Database(args.db)
 
     stop_event = threading.Event()
 
@@ -45,9 +53,22 @@ def main() -> None:
     signal.signal(signal.SIGINT, _request_shutdown)
     signal.signal(signal.SIGTERM, _request_shutdown)
 
-    history = HistoryStore()
+    # 2. Setup Pager Client early for recovery use
+    pager = None
+    if args.pager:
+        host, port = parse_hostport(args.pager)
+        pager = PagerClient(host=host, port=port)
+
+    # 3. Handle History (Imports CSV to SQL if necessary) 
+    history = HistoryStore(db)
     n = history.load_history_csv(args.history)
-    log.info("loaded history.csv rows=%d", n)
+    log.info("history loaded into database: rows processed=%d", n)
+
+    # 4. Startup Recovery: Resend alerts marked as 'failed' 
+    if pager and not args.dry_run_pager:
+        recovered = db.retry_failed_alerts(pager)
+        if recovered > 0:
+            log.info("recovered %d failed alerts on startup", recovered)
 
     inf = InferenceService(bundle_path=args.model_bundle, device=args.device)
     if inf.is_ready():
@@ -55,12 +76,14 @@ def main() -> None:
     else:
         log.warning("model bundle not loaded (missing or invalid): %s. Running with no-op predictions.", args.model_bundle)
 
-    pager = None
-    if args.pager:
-        host, port = parse_hostport(args.pager)
-        pager = PagerClient(host=host, port=port)
-
-    router = Router(history=history, inference=inf, pager=pager, dry_run_pager=args.dry_run_pager)
+    # 6. Setup Router with DB for persistent state
+    router = Router(
+        db=db, 
+        history=history, 
+        inference=inf, 
+        pager=pager, 
+        dry_run_pager=args.dry_run_pager
+    )
 
     host, port = parse_hostport(args.mllp)
     client = MLLPClient((host, port))
