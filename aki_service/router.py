@@ -9,6 +9,8 @@ from .history import HistoryStore
 from .inference import Demographics, InferenceService
 from .pager import PagerClient
 from .model_compat import date_to_ordinal_from_any
+from datetime import datetime
+from pprint import pprint
 
 
 log = logging.getLogger("aki_service")
@@ -30,11 +32,11 @@ class Router:
     def __init__(
         self,
         *,
+        db,
         history: HistoryStore,
         inference: InferenceService,
         pager: Optional[PagerClient] = None,
         dry_run_pager: bool = False,
-        db
     ) -> None:
         self.history = history
         self.inference = inference
@@ -83,6 +85,7 @@ class Router:
 
         if isinstance(ev, hl7.CreatinineEvent):
 
+            # test_time_iso = self.normalize_to_iso(ev.test_time)
             is_new = self.db.insert_lab(ev.mrn, ev.test_time, ev.value)
             if not is_new:
                 log.info("Duplicate lab received for MRN %s at %s; skipping inference.", ev.mrn, ev.test_time)
@@ -98,6 +101,13 @@ class Router:
                 demo = Demographics(dob_yyyymmdd=ps_dict['dob'], sex=ps_dict['sex'])
 
             # 3. Predict
+            print("Calling predict_aki with:")
+            pprint({
+                "mrn": ev.mrn,
+                "test_time_hl7": ev.test_time,
+                "history_ord_vals": history_ord_vals,
+                "demographics": demo,
+            })
             should_page = self.inference.predict_aki(
                 mrn=ev.mrn,
                 test_time_hl7=ev.test_time,
@@ -109,6 +119,19 @@ class Router:
             if ps_dict and ps_dict['is_admitted'] == 0:
                 log.info("Suppressed alert for MRN %s (Discharged)", ev.mrn)
                 should_page = False
+
+            # If paged for this MRN already, it doesnt page again, to avoid repeated paging for the same patient
+
+            if should_page:
+                with self.db._get_conn() as conn:
+                    already_sent = conn.execute(
+                        "SELECT 1 FROM alerts WHERE mrn = ? AND status = 'sent' LIMIT 1",
+                        (ev.mrn,),
+                    ).fetchone() is not None
+
+                if already_sent:
+                    log.info("Suppressed repeat page for MRN %s (already sent before)", ev.mrn)
+                    should_page = False
 
             if should_page:
                 import time
@@ -138,3 +161,39 @@ class Router:
             
             return "AA"
         return "AA"
+    
+    @staticmethod
+    def parse_hl7_timestamp(ts: str) -> datetime:
+        s = str(ts).strip()
+        if not s.isdigit():
+            raise ValueError(f"Not an HL7 timestamp: {ts}")
+
+        if len(s) == 8:
+            return datetime.strptime(s, "%Y%m%d")
+        if len(s) == 12:
+            return datetime.strptime(s, "%Y%m%d%H%M")
+        if len(s) == 14:
+            return datetime.strptime(s, "%Y%m%d%H%M%S")
+        raise ValueError(f"Unsupported HL7 timestamp length: {ts}")
+
+    @staticmethod
+    def normalize_to_iso(ts: str) -> str:
+        s = str(ts).strip()
+
+        # ISO with space, seconds optional
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M"):
+            try:
+                return datetime.strptime(s, fmt).strftime("%Y-%m-%d %H:%M:%S")
+            except ValueError:
+                pass
+
+        # ISO with T / timezone
+        try:
+            dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+            return dt.strftime("%Y-%m-%d %H:%M:%S")
+        except Exception:
+            pass
+
+        # HL7 fallback
+        dt = Router.parse_hl7_timestamp(s)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
