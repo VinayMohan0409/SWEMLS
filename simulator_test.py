@@ -10,6 +10,7 @@ import time
 import unittest
 import urllib.error
 import urllib.request
+import sys
 
 import simulator
 
@@ -71,6 +72,7 @@ class SimulatorTest(unittest.TestCase):
             for m in (ADT_A01, ORU_R01, ADT_A03):
                 w.write(to_mllp(m))
         self.simulator = subprocess.Popen([
+            sys.executable,
             "./simulator.py",
             f"--mllp={TEST_MLLP_PORT}",
             f"--pager={TEST_PAGER_PORT}",
