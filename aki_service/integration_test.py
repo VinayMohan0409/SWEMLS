@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import argparse
-import runpy
 import csv
 import os
 import re
@@ -13,6 +12,7 @@ import threading
 import time
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Optional, Set, Tuple
 
@@ -24,6 +24,41 @@ PAGER_RE = re.compile(
 )
 
 
+def normalize_timestamp(ts: str) -> str:
+    """
+    Normalize timestamps to YYYY-MM-DD HH:MM:SS format.
+    Handles both ISO (2025-03-30 22:58:00) and HL7 (20250330225800) formats.
+    """
+    s = str(ts).strip()
+    
+    # Already in ISO format with seconds
+    if len(s) == 19 and s[4] == '-' and s[7] == '-':
+        return s
+    
+    # ISO format without seconds  
+    if len(s) == 16 and s[4] == '-' and s[7] == '-':
+        return s + ":00"
+    
+    # HL7 format (YYYYMMDDHHMMSS, YYYYMMDDHHMM, or YYYYMMDD)
+    if s.isdigit():
+        if len(s) == 8:  # YYYYMMDD
+            dt = datetime.strptime(s, "%Y%m%d")
+        elif len(s) == 12:  # YYYYMMDDHHMM
+            dt = datetime.strptime(s, "%Y%m%d%H%M")
+        elif len(s) == 14:  # YYYYMMDDHHMMSS
+            dt = datetime.strptime(s, "%Y%m%d%H%M%S")
+        else:
+            raise ValueError(f"Unsupported HL7 timestamp length: {s}")
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Try generic ISO parsing
+    try:
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except:
+        raise ValueError(f"Cannot parse timestamp: {ts}")
+
+
 def repo_root_from_here() -> Path:
     """
     This file is located at: <repo_root>/aki_service/integration_test.py
@@ -32,20 +67,27 @@ def repo_root_from_here() -> Path:
     return Path(__file__).resolve().parents[1]
 
 
-def load_expected_pages(expected_csv: Path) -> Set[Tuple[int, str]]:
+def load_expected_pages(expected_csv: Path) -> Set[Tuple[str, str]]:
     """
     expected aki.csv format:
       mrn,date
       123765409,2024-03-31 22:09:00
+      
+    Returns: Set of (mrn_str, normalized_timestamp) tuples
     """
-    out: Set[int] = set() # Changed to set of ints
+    out: Set[Tuple[str, str]] = set()
     with expected_csv.open("r", newline="") as f:
         r = csv.DictReader(f)
         for row in r:
             mrn_s = (row.get("mrn") or "").strip()
-            if not mrn_s:
+            date_s = (row.get("date") or "").strip()
+            if not mrn_s or not date_s:
                 continue
-            out.add(int(mrn_s)) # Only add the MRN
+            
+            # Normalize the timestamp from aki.csv
+            normalized_date = normalize_timestamp(date_s)
+            out.add((mrn_s, normalized_date))
+    
     return out
 
 
@@ -124,7 +166,7 @@ def main() -> int:
     messages = Path(args.messages) if args.messages else repo / "messages.mllp"
     expected_csv = Path(args.expected) if args.expected else repo / "aki.csv"
     history_csv = Path(args.history) if args.history else repo / "history.csv"
-    model_bundle = Path(args.model_bundle) if args.model_bundle else repo / "model" / "aki_model.pt"
+    model_bundle = Path(args.model_bundle) if args.model_bundle else repo / "model" / "model.pt"
 
     # Basic existence checks
     for p, name in [
@@ -139,6 +181,7 @@ def main() -> int:
             return 2
 
     expected_pages = load_expected_pages(expected_csv)
+    print(f"[info] Loaded {len(expected_pages)} expected events from {expected_csv.name}", flush=True)
 
     # reset SQLite DB so runs are repeatable
     inspect_db = repo / "aki_service" / "inspectdb.py"
@@ -174,9 +217,6 @@ def main() -> int:
     sim = start_process(sim_cmd, cwd=repo, env=env)
     print(f"[debug] simulator pid={sim.proc.pid}", flush=True)
     time.sleep(1.0)
-    print("[debug] simulator output sample:", flush=True)
-    for ln in tail_lines(sim, 20):
-        print("  " + ln, flush=True)
 
 
     # Give simulator a moment to bind ports
@@ -201,8 +241,8 @@ def main() -> int:
     print(f"[info] starting service: {' '.join(svc_cmd)}", flush=True)
     svc = start_process(svc_cmd, cwd=repo, env=env)
 
-    # Inside main()
-    received_pages: Set[int] = set() # Changed from Set[Tuple[int, str]]
+    # Track (MRN, normalized_timestamp) tuples
+    received_pages: Set[Tuple[str, str]] = set()
     mllp_ack_errors: list[str] = []
     last_sim_idx = 0
 
@@ -217,33 +257,23 @@ def main() -> int:
         svc_rc = svc.proc.poll()
         if sim_rc is not None or svc_rc is not None:
             print(f"[debug] sim exited rc={sim_rc}, svc exited rc={svc_rc}", flush=True)
-
-            print("\n--- simulator stdout (tail on exit) ---", flush=True)
-            for ln in tail_lines(sim, 80):
-                print(ln, flush=True)
-
-            print("\n--- service stdout (tail on exit) ---", flush=True)
-            for ln in tail_lines(svc, 80):
-                print(ln, flush=True)
-
             break
 
-        # Parse latest simulator output
         # Parse simulator output incrementally (no tail rescans)
         with sim.lock:
             new_lines = sim.lines[last_sim_idx:]
             last_sim_idx = len(sim.lines)
 
-        # Inside the while time.time() < deadline: loop
+        # Parse pager output for (MRN, timestamp) pairs
         for ln in new_lines:
             if "not acknowledged" in ln.lower():
                 mllp_ack_errors.append(ln)
 
             m = PAGER_RE.search(ln)
             if m:
-                mrn = int(m.group("mrn"))
-                # We ignore m.group("dt") as requested
-                received_pages.add(mrn)
+                mrn = m.group("mrn")  # Keep as string
+                dt = m.group("dt")    # Already in YYYY-MM-DD HH:MM:SS format
+                received_pages.add((mrn, dt))
 
 
         # Stop when simulator finishes replay
@@ -303,6 +333,17 @@ def main() -> int:
     print(f"TP={tp} FP={fp} FN={fn}")
     print(f"Precision={precision:.4f} Recall={recall:.4f} F1={f1:.4f} F3={f3:.4f}")
 
+    # Additional analysis
+    expected_mrns = set(mrn for mrn, _ in expected_pages)
+    received_mrns = set(mrn for mrn, _ in received_pages)
+    
+    print(f"\nMRN-level stats:")
+    print(f"  Expected unique MRNs: {len(expected_mrns)}")
+    print(f"  Received unique MRNs: {len(received_mrns)}")
+    print(f"  Correct MRNs: {len(expected_mrns & received_mrns)}")
+    print(f"  Wrong MRNs (paged but shouldn't): {len(received_mrns - expected_mrns)}")
+    print(f"  Missed MRNs (should page but didn't): {len(expected_mrns - received_mrns)}")
+
     ok_mllp = len(mllp_ack_errors) == 0
     ok_pages = received_pages == expected_pages
 
@@ -313,11 +354,21 @@ def main() -> int:
 
     if not ok_pages:
         print("\n[FAIL] Paging mismatch vs aki.csv")
+        
+        # Categorize FPs: wrong MRN vs repeat page
+        wrong_mrn_fps = [(mrn, dt) for mrn, dt in fp_set if mrn not in expected_mrns]
+        repeat_fps = [(mrn, dt) for mrn, dt in fp_set if mrn in expected_mrns]
+        
+        if wrong_mrn_fps:
+            print(f"\n  Wrong MRN False Positives (shouldn't page at all): {len(wrong_mrn_fps)}")
+            print(f"    Sample (up to 10): {sorted(wrong_mrn_fps)[:10]}")
+        
+        if repeat_fps:
+            print(f"\n  Repeat/Wrong-Time False Positives (correct MRN, wrong time): {len(repeat_fps)}")
+            print(f"    Sample (up to 10): {sorted(repeat_fps)[:10]}")
+        
         if fn_set:
-            # sorted(list(fn_set)) will now just be a list of MRNs
-            print(f"Missing (FN) MRNs (up to 10): {sorted(list(fn_set))[:10]}")
-        if fp_set:
-            print(f"Unexpected (FP) MRNs (up to 10): {sorted(list(fp_set))[:10]}")
+            print(f"\n  Missing (FN) events (up to 10): {sorted(list(fn_set))[:10]}")
 
     if not (ok_mllp and ok_pages):
         print("\n--- simulator stdout (tail) ---")

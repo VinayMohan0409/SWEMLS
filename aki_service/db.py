@@ -53,6 +53,21 @@ class Database:
             """)
             conn.commit()
 
+    def has_alert_for_current_admission(self, mrn: str) -> bool:
+        """Checks if a 'sent' alert exists since the patient's last admission."""
+        with self._get_conn() as conn:
+            # We join alerts and patients to compare the alert time with the last_admit_time
+            row = conn.execute("""
+                SELECT 1 FROM alerts a
+                JOIN patients p ON a.mrn = p.mrn
+                WHERE a.mrn = ? 
+                  AND a.status = 'sent'
+                  AND a.test_time >= p.last_admit_time
+                LIMIT 1
+            """, (mrn,)).fetchone()
+            return row is not None
+
+
     def insert_lab(self, mrn: str, test_time: str, value: float) -> bool:
         """Returns True if new data was saved; False if duplicate."""
         try:

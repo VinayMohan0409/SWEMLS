@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Dict, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 import torch
 
-from .history import HistoryStore
-from .model_compat import ModelBundle, build_single_example_tensors, load_bundle, parse_hl7_timestamp
+from .model_compat import ModelBundle, load_bundle, parse_hl7_timestamp, predict_prob
 
 
 @dataclass
@@ -26,9 +25,10 @@ def compute_age_years(dob_yyyymmdd: str, at_hl7_ts: str) -> Optional[float]:
 
 
 class InferenceService:
-    """Loads a Task-1-exported model bundle and runs per-event inference."""
+    """Loads Vinay sklearn LR model (model.pt + threshold.pt) and runs per-event inference."""
 
     def __init__(self, *, bundle_path: Optional[str], device: str = "cpu") -> None:
+        # device kept for CLI compatibility; sklearn runs on CPU
         self.device = torch.device(device)
         self.bundle: Optional[ModelBundle] = None
         self.bundle_path = bundle_path
@@ -53,23 +53,19 @@ class InferenceService:
             return False
 
         age_years = 0.0
-        sex = "f"
+        sex = "F"
         if demographics is not None:
             a = compute_age_years(demographics.dob_yyyymmdd, test_time_hl7)
             if a is not None:
                 age_years = a
             sex = demographics.sex
 
-        vals, times, mask, age, sex_t = build_single_example_tensors(
+        prob = predict_prob(
+            self.bundle,
             history_ord_vals=history_ord_vals,
             age_years=age_years,
             sex=sex,
-            device=self.device,
         )
-        with torch.no_grad():
-            logit = self.bundle.model(vals, times, mask, age, sex_t)
-            prob = torch.sigmoid(logit).item()
-        
         result = prob >= float(self.bundle.threshold)
-        print(f"MRN: {mrn} | Prediction: {result} | Probability: {prob:.4f}")
+        print(f"MRN: {mrn} | Prediction: {result} | Probability: {prob:.4f} | Threshold: {self.bundle.threshold:.4f}")
         return result
