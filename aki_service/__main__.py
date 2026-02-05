@@ -27,7 +27,7 @@ def main() -> None:
     ap.add_argument("--mllp", default=os.environ.get("MLLP_ADDRESS", "localhost:8440"), help="MLLP server host:port")
     ap.add_argument("--pager", default=os.environ.get("PAGER_ADDRESS", "localhost:8441"), help="Pager server host:port")
     ap.add_argument("--history", default="/data/history.csv", help="Path to history.csv (wide format)")
-    ap.add_argument("--model-bundle", default=os.environ.get("AKI_MODEL_BUNDLE", "/app/model/aki_model.pt"), help="Path to exported model bundle (.pt)")
+    ap.add_argument("--model-bundle", default=os.environ.get("AKI_MODEL_BUNDLE", "/app/model/model.pt"), help="Path to exported model bundle (.pt)")
     ap.add_argument("--device", default=os.environ.get("AKI_DEVICE", "cpu"), help="torch device (cpu)")
     ap.add_argument("--dry-run-pager", action="store_true", help="Do not send POSTs to pager (log only)")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
@@ -60,6 +60,7 @@ def main() -> None:
         pager = PagerClient(host=host, port=port)
 
     # 3. Handle History (Imports CSV to SQL if necessary) 
+    log.info("loading history csv: %s", args.history)
     history = HistoryStore(db)
     n = history.load_history_csv(args.history)
     log.info("history loaded into database: rows processed=%d", n)

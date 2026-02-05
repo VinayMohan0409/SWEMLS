@@ -1,7 +1,9 @@
 import sqlite3
 import os
+from pathlib import Path
 
-DB_PATH = "../aki_service.db"
+
+DB_PATH = Path(__file__).resolve().parents[1] / "aki_service.db"
 
 def clear_database(conn):
     """Wipes all data from the tables but keeps the schema."""

@@ -27,30 +27,46 @@ class HistoryStore:
         self.db = db 
     
     def load_history_csv(self, path: str) -> int:
-            p = Path(path)
-            if not p.exists():
-                return 0
-                
-            # Updated check: Just try to get any history from a known MRN or check labs count
-            # For simplicity, we can let the SQL 'INSERT OR IGNORE' handles duplicates, 
-            # but to follow your 'Optimization' logic:
-            # Use a simple query to see if the table is already populated.
-            
-            n = 0
-            with p.open("r", newline="") as f:
-                reader = csv.DictReader(f)
-                for row in reader:
-                    mrn = row["mrn"].strip()
-                    # Unpivot the wide format 
-                    for k in range(26):
-                        date_key = f"creatinine_date_{k}"
-                        res_key = f"creatinine_result_{k}"
-                        
-                        if date_key in row and row[date_key] and row[res_key]:
-                            # insert_lab already handles duplicates via IntegrityError
-                            if self.db.insert_lab(mrn, row[date_key], float(row[res_key])):
-                                n += 1
-            return n
+        p = Path(path)
+        if not p.exists():
+            return 0
+
+        n = 0
+        batch: List[Tuple[str, str, float]] = []
+        batch_size = 5000
+
+        with p.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            date_columns = sorted([c for c in fieldnames if c.startswith("creatinine_date_")])
+
+            for row in reader:
+                mrn = (row.get("mrn") or "").strip()
+                if not mrn:
+                    continue
+
+                for date_col in date_columns:
+                    idx = date_col.replace("creatinine_date_", "")
+                    result_col = f"creatinine_result_{idx}"
+                    d = row.get(date_col)
+                    v = row.get(result_col)
+                    if not d or not v:
+                        continue
+                    try:
+                        value = float(v)
+                    except (ValueError, TypeError):
+                        continue
+
+                    batch.append((mrn, d, value))
+                    if len(batch) >= batch_size:
+                        n += self.db.insert_labs_bulk(batch)
+                        batch.clear()
+
+        if batch:
+            n += self.db.insert_labs_bulk(batch)
+
+        return n
+
     
     def get_history_from_db(self, mrn: str) -> List[Tuple[int, float]]:
         """Fetches labs from DB and converts dates to ordinals for the model."""
