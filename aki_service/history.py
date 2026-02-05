@@ -30,26 +30,38 @@ class HistoryStore:
             p = Path(path)
             if not p.exists():
                 return 0
-                
-            # Updated check: Just try to get any history from a known MRN or check labs count
-            # For simplicity, we can let the SQL 'INSERT OR IGNORE' handles duplicates, 
-            # but to follow your 'Optimization' logic:
-            # Use a simple query to see if the table is already populated.
             
             n = 0
             with p.open("r", newline="") as f:
                 reader = csv.DictReader(f)
+                
+                # Get all column names once
+                fieldnames = reader.fieldnames or []
+                
+                # Dynamically find all creatinine column pairs
+                # Look for columns matching pattern: creatinine_date_N, creatinine_result_N
+                date_columns = sorted([
+                    col for col in fieldnames 
+                    if col.startswith("creatinine_date_")
+                ])
+                
                 for row in reader:
                     mrn = row["mrn"].strip()
-                    # Unpivot the wide format 
-                    for k in range(26):
-                        date_key = f"creatinine_date_{k}"
-                        res_key = f"creatinine_result_{k}"
+                    
+                    # Process each date column dynamically
+                    for date_col in date_columns:
+                        # Extract the index (e.g., "creatinine_date_5" -> "5")
+                        idx = date_col.replace("creatinine_date_", "")
+                        result_col = f"creatinine_result_{idx}"
                         
-                        if date_key in row and row[date_key] and row[res_key]:
-                            # insert_lab already handles duplicates via IntegrityError
-                            if self.db.insert_lab(mrn, row[date_key], float(row[res_key])):
-                                n += 1
+                        if result_col in row and row[date_col] and row[result_col]:
+                            try:
+                                value = float(row[result_col])
+                                if self.db.insert_lab(mrn, row[date_col], value):
+                                    n += 1
+                            except (ValueError, TypeError):
+                                # Skip rows with invalid numeric values
+                                pass
             return n
     
     def get_history_from_db(self, mrn: str) -> List[Tuple[int, float]]:

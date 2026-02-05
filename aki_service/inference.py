@@ -66,6 +66,14 @@ class InferenceService:
             age_years=age_years,
             sex=sex,
         )
-        result = prob >= float(self.bundle.threshold)
-        print(f"MRN: {mrn} | Prediction: {result} | Probability: {prob:.4f} | Threshold: {self.bundle.threshold:.4f}")
+        
+        # Round to 8 decimal places to ensure deterministic comparison across CPUs
+        # Different CPU architectures (Intel/AMD/ARM) can produce slightly different
+        # floating-point results for the same sklearn model, causing predictions
+        # at the boundary to flip between True/False non-deterministically.
+        prob = round(prob, 8)
+        threshold = round(float(self.bundle.threshold), 8)
+        
+        result = prob >= threshold
+        print(f"MRN: {mrn} | Prediction: {result} | Probability: {prob:.6f} | Threshold: {threshold:.6f} | History: {len(history_ord_vals)} entries")
         return result

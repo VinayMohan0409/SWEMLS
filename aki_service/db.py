@@ -9,14 +9,38 @@ log = logging.getLogger("aki_service")
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
+        self._conn = None  # Single connection, reused
         self._init_db()
 
     def _get_conn(self):
-        # Write-Ahead Logging (WAL) ensures durability during sudden restarts
-        conn = sqlite3.connect(self.db_path, timeout=10)
-        conn.execute("PRAGMA journal_mode=WAL;")
-        conn.row_factory = sqlite3.Row
-        return conn
+        """
+        Returns a SINGLE reusable connection.
+        
+        Why this matters:
+        - Each sqlite3.connect() creates a new "view" of the database
+        - With WAL mode, a new connection might not see recent writes immediately
+        - By reusing ONE connection, all reads see all previous writes
+        
+        This prevents non-deterministic behavior where:
+        - insert_lab() writes with Connection A
+        - get_history() reads with Connection B (might miss the write!)
+        """
+        if self._conn is None:
+            self._conn = sqlite3.connect(
+                self.db_path, 
+                timeout=10,
+                check_same_thread=False  # Safe since we're single-threaded message processing
+            )
+            self._conn.execute("PRAGMA journal_mode=WAL;")
+            self._conn.execute("PRAGMA synchronous=NORMAL;")  # Good balance of safety/speed
+            self._conn.row_factory = sqlite3.Row
+        return self._conn
+    
+    def close(self):
+        """Explicitly close the connection when done."""
+        if self._conn is not None:
+            self._conn.close()
+            self._conn = None
 
     def _init_db(self):
         with self._get_conn() as conn:
@@ -55,17 +79,18 @@ class Database:
 
     def has_alert_for_current_admission(self, mrn: str) -> bool:
         """Checks if a 'sent' alert exists since the patient's last admission."""
-        with self._get_conn() as conn:
-            # We join alerts and patients to compare the alert time with the last_admit_time
-            row = conn.execute("""
-                SELECT 1 FROM alerts a
-                JOIN patients p ON a.mrn = p.mrn
-                WHERE a.mrn = ? 
-                  AND a.status = 'sent'
-                  AND a.test_time >= p.last_admit_time
-                LIMIT 1
-            """, (mrn,)).fetchone()
-            return row is not None
+        conn = self._get_conn()
+        # Compare alert test_time with patient's last_admit_time
+        # Both are in HL7 format (YYYYMMDDHHMMSS), so string comparison works
+        row = conn.execute("""
+            SELECT 1 FROM alerts a
+            JOIN patients p ON a.mrn = p.mrn
+            WHERE a.mrn = ? 
+              AND a.status = 'sent'
+              AND a.test_time >= p.last_admit_time
+            LIMIT 1
+        """, (mrn,)).fetchone()
+        return row is not None
 
 
     def insert_lab(self, mrn: str, test_time: str, value: float) -> bool:
