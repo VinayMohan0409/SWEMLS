@@ -1,273 +1,380 @@
+# tests/unit/test_router.py
+
+import sqlite3
+from dataclasses import dataclass
+
 import pytest
 
-from aki_service.router import Router
-from aki_service.inference import Demographics
+import aki_service.router as router_mod
 
 
-# event types (match the isinstance checks in Router.handle_message)
-class FakeUnknownEvent:
-    def __init__(self, msg_type="ZZZ^ZZZ"):
-        self.msg_type = msg_type
-
-
-class FakeAdmitEvent:
-    def __init__(self, mrn="1", dob="20000101", sex="M", msg_time="20240101000000"):
-        self.mrn = mrn
-        self.dob = dob
-        self.sex = sex
-        self.msg_time = msg_time
-
-
-class FakeDischargeEvent:
-    def __init__(self, mrn="1", msg_time="20240102000000"):
-        self.mrn = mrn
-        self.msg_time = msg_time
-
-
-class FakeCreatinineEvent:
-    def __init__(self, mrn="1", test_time="20240103000000", value=150.0):
-        self.mrn = mrn
-        self.test_time = test_time
-        self.value = value
-
-
-class FakeHL7ParseError(Exception):
-    pass
-
-
-class FakeHistory:
-    def __init__(self, history_map=None):
-        self.history_map = history_map or {}
-
-    def get_history_from_db(self, mrn: str):
-        return self.history_map.get(mrn, [])
-
-
-class FakeInference:
-    def __init__(self, will_page: bool):
-        self.will_page = will_page
-        self.calls = []
-
-    def predict_aki(self, *, mrn, test_time_hl7, history_ord_vals, demographics):
-        self.calls.append((mrn, test_time_hl7, history_ord_vals, demographics))
-        return self.will_page
-
-
-class FakePager:
-    def __init__(self, ok=True, info="OK"):
-        self.ok = ok
-        self.info = info
-        self.calls = []
-
-    def send_page(self, mrn, test_time):
-        self.calls.append((mrn, test_time))
-        return self.ok, self.info
-
-
-class FakeConnCtx:
-    """context manager returned by db._get_conn() used in Router"""
-    def __init__(self, db):
-        self.db = db
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        return False
-
-    def execute(self, sql, params):
-        self.db.executed.append((sql.strip(), params))
-
-    def commit(self):
-        self.db.commits += 1
+def make_conn():
+    conn = sqlite3.connect(":memory:")
+    conn.execute(
+        """
+        CREATE TABLE alerts (
+            mrn TEXT NOT NULL,
+            test_time TEXT NOT NULL,
+            status TEXT NOT NULL,
+            attempt_count INTEGER NOT NULL,
+            last_attempt_time TEXT,
+            UNIQUE(mrn, test_time)
+        )
+        """
+    )
+    conn.commit()
+    return conn
 
 
 class FakeDB:
-    def __init__(self):
-        self.updated_patients = []
-        self.insert_labs = []   # (mrn, test_time, value) calls
-        self.history = {}
-        self.patient_state = {} # mrn -> dict
-        self.alert_updates = [] # (mrn, test_time, status)
-        self.executed = []      # SQL executed via _get_conn()
-        self.commits = 0
+    def __init__(self, conn):
+        self._conn = conn
+        self.updated = []
+        self.labs = []
+        self.patient_state = {}
 
-        # Control flags
-        self.insert_lab_returns = True      # can flip to simulate duplicates
+        self.insert_lab_return = True
+
+    def _get_conn(self):
+        return self._conn
 
     def update_patient(self, mrn, **kwargs):
-        self.updated_patients.append((mrn, kwargs))
+        self.updated.append((mrn, kwargs))
 
     def insert_lab(self, mrn, test_time, value):
-        self.insert_labs.append((mrn, test_time, value))
-        return self.insert_lab_returns
+        self.labs.append((mrn, test_time, value))
+        return self.insert_lab_return
 
     def get_patient_state(self, mrn):
         return self.patient_state.get(mrn)
 
-    def update_alert(self, mrn, test_time, status):
-        self.alert_updates.append((mrn, test_time, status))
 
-    def _get_conn(self):
-        return FakeConnCtx(self)
+class FakeHistory:
+    def __init__(self, history=None):
+        self.history = history if history is not None else []
+        self.calls = []
 
-
-
-@pytest.fixture
-def make_router(monkeypatch):
-    def _make(*, inference_will_page=False, dry_run_pager=False, pager=None, patient_state=None, history_map=None):
-        db = FakeDB()
-        if patient_state is not None:
-            db.patient_state.update(patient_state)
-
-        history = FakeHistory(history_map=history_map)
-        inference = FakeInference(will_page=inference_will_page)
-
-        r = Router(history=history, inference=inference, pager=pager, dry_run_pager=dry_run_pager, db=db)
-        return r, db, inference
-    return _make
+    def get_history_from_db(self, mrn):
+        self.calls.append(mrn)
+        return list(self.history)
 
 
-def patch_hl7(monkeypatch, event_obj):
-    # Patch Router's hl7 module so isinstance checks work against fake classes
-    import aki_service.router as router_mod
+class FakeInference:
+    def __init__(self, ready=True, should_page=False, crash=False):
+        self._ready = ready
+        self._should_page = should_page
+        self._crash = crash
+        self.calls = []
 
-    class FakeHL7Module:
-        HL7ParseError = FakeHL7ParseError
-        UnknownEvent = FakeUnknownEvent
-        AdmitEvent = FakeAdmitEvent
-        DischargeEvent = FakeDischargeEvent
-        CreatinineEvent = FakeCreatinineEvent
+    def is_ready(self):
+        return self._ready
 
-        @staticmethod
-        def parse_event(_bytes):
-            return event_obj
-
-    monkeypatch.setattr(router_mod, "hl7", FakeHL7Module)
-
-
-def test_handle_message_parse_error_returns_AE(monkeypatch, make_router):
-    # Tests that HL7 parse errors return AE
-    r, db, inf = make_router()
-
-    import aki_service.router as router_mod
-
-    class FakeHL7Module:
-        HL7ParseError = FakeHL7ParseError
-
-        @staticmethod
-        def parse_event(_bytes):
-            raise FakeHL7ParseError("bad")
-
-        UnknownEvent = FakeUnknownEvent
-        AdmitEvent = FakeAdmitEvent
-        DischargeEvent = FakeDischargeEvent
-        CreatinineEvent = FakeCreatinineEvent
-
-    monkeypatch.setattr(router_mod, "hl7", FakeHL7Module)
-
-    assert r.handle_message(b"...") == "AE"
+    def predict_aki(self, *, mrn, test_time_hl7, history_ord_vals, demographics):
+        self.calls.append(
+            dict(
+                mrn=mrn,
+                test_time_hl7=test_time_hl7,
+                history_ord_vals=history_ord_vals,
+                demographics=demographics,
+            )
+        )
+        if self._crash:
+            raise RuntimeError("boom")
+        return self._should_page
 
 
-def test_handle_message_unknown_event_returns_AA(monkeypatch, make_router):
-    # Tests that unknown message types are accepted (AA) and ignored
-    r, db, inf = make_router()
-    patch_hl7(monkeypatch, FakeUnknownEvent("FOO^BAR"))
+class FakePager:
+    def __init__(self, ok=True):
+        self.ok = ok
+        self.calls = []
 
-    assert r.handle_message(b"...") == "AA"
-    assert db.updated_patients == []
-    assert db.insert_labs == []
-
-
-def test_handle_message_admit_updates_patient(monkeypatch, make_router):
-    # Tests that AdmitEvent updates DB patient admitted=True and returns AA
-    r, db, inf = make_router()
-    ev = FakeAdmitEvent(mrn="7", dob="19900101", sex="F", msg_time="20240101010101")
-    patch_hl7(monkeypatch, ev)
-
-    assert r.handle_message(b"...") == "AA"
-    assert db.updated_patients == [("7", {"is_admitted": True, "dob": "19900101", "sex": "F", "admit_time": "20240101010101"})]
+    def send_page(self, mrn, test_time):
+        self.calls.append((mrn, test_time))
+        return (self.ok, "info")
 
 
-def test_handle_message_discharge_updates_patient(monkeypatch, make_router):
-    # Tests that DischargeEvent updates DB patient admitted=False and returns AA
-    r, db, inf = make_router()
-    ev = FakeDischargeEvent(mrn="7", msg_time="20240102020202")
-    patch_hl7(monkeypatch, ev)
+def patch_hl7(monkeypatch):
+    class HL7ParseError(Exception):
+        pass
 
-    assert r.handle_message(b"...") == "AA"
-    assert db.updated_patients == [("7", {"is_admitted": False, "discharge_time": "20240102020202"})]
+    @dataclass
+    class UnknownEvent:
+        msg_type: str = "ZZZ"
 
+    @dataclass
+    class AdmitEvent:
+        mrn: str
+        dob: str
+        sex: str
+        msg_time: str
 
-def test_creatinine_duplicate_lab_skips_inference(monkeypatch, make_router):
-    # Tests that duplicate labs (insert_lab False) skip inference and still return AA
-    r, db, inf = make_router()
-    db.insert_lab_returns = False
+    @dataclass
+    class DischargeEvent:
+        mrn: str
+        msg_time: str
 
-    patch_hl7(monkeypatch, FakeCreatinineEvent(mrn="1", test_time="20240103000000", value=123.0))
-    assert r.handle_message(b"...") == "AA"
+    @dataclass
+    class CreatinineEvent:
+        mrn: str
+        test_time: str
+        value: float
 
-    assert len(db.insert_labs) == 1
-    assert inf.calls == []  # inference not called
+    monkeypatch.setattr(router_mod.hl7, "HL7ParseError", HL7ParseError, raising=True)
+    monkeypatch.setattr(router_mod.hl7, "UnknownEvent", UnknownEvent, raising=True)
+    monkeypatch.setattr(router_mod.hl7, "AdmitEvent", AdmitEvent, raising=True)
+    monkeypatch.setattr(router_mod.hl7, "DischargeEvent", DischargeEvent, raising=True)
+    monkeypatch.setattr(router_mod.hl7, "CreatinineEvent", CreatinineEvent, raising=True)
 
-
-def test_creatinine_pages_in_dry_run(monkeypatch, make_router):
-    # Tests that when inference says page and dry_run_pager=True, alert is marked sent without pager call
-    patient_state = {"1": {"dob": "20000101", "sex": "M", "is_admitted": 1}}
-    history_map = {"1": [(100, 1.0), (101, 2.0)]}
-
-    r, db, inf = make_router(
-        inference_will_page=True,
-        dry_run_pager=True,
-        pager=None,
-        patient_state=patient_state,
-        history_map=history_map,
+    return dict(
+        HL7ParseError=HL7ParseError,
+        UnknownEvent=UnknownEvent,
+        AdmitEvent=AdmitEvent,
+        DischargeEvent=DischargeEvent,
+        CreatinineEvent=CreatinineEvent,
     )
-    patch_hl7(monkeypatch, FakeCreatinineEvent(mrn="1", test_time="20240103000000", value=150.0))
-
-    assert r.handle_message(b"...") == "AA"
-
-    # pending then sent
-    assert ("1", "20240103000000", "pending") in db.alert_updates
-    assert ("1", "20240103000000", "sent") in db.alert_updates
-
-    # inference called once with Demographics
-    assert len(inf.calls) == 1
-    mrn, t, hist, demo = inf.calls[0]
-    assert mrn == "1"
-    assert t == "20240103000000"
-    assert hist == history_map["1"]
-    assert isinstance(demo, Demographics)
 
 
-def test_creatinine_suppressed_if_discharged(monkeypatch, make_router):
-    # Tests that discharged patients suppress paging even if inference says page
-    patient_state = {"1": {"dob": "20000101", "sex": "M", "is_admitted": 0}}
-    r, db, inf = make_router(inference_will_page=True, dry_run_pager=True, patient_state=patient_state)
-    patch_hl7(monkeypatch, FakeCreatinineEvent(mrn="1", test_time="20240103000000", value=150.0))
-
-    assert r.handle_message(b"...") == "AA"
-    # No alerts created because suppressed
-    assert db.alert_updates == []
+def patch_date_to_ordinal(monkeypatch):
+    monkeypatch.setattr(router_mod, "date_to_ordinal_from_any", lambda _: 10, raising=True)
 
 
-def test_creatinine_pages_via_pager_updates_status(monkeypatch, make_router):
-    # Tests that pager send updates alerts status to sent/failed and increments attempt count via SQL
-    patient_state = {"1": {"dob": "20000101", "sex": "M", "is_admitted": 1}}
-    pager = FakePager(ok=True, info="OK")
-    r, db, inf = make_router(inference_will_page=True, dry_run_pager=False, pager=pager, patient_state=patient_state)
-    patch_hl7(monkeypatch, FakeCreatinineEvent(mrn="1", test_time="20240103000000", value=150.0))
+def test_handle_message_parse_error_returns_ae(monkeypatch):
+    types = patch_hl7(monkeypatch)
 
-    assert r.handle_message(b"...") == "AA"
+    def parse_event(_):
+        raise types["HL7ParseError"]("bad")
 
-    # pending alert before send
-    assert ("1", "20240103000000", "pending") in db.alert_updates
-    # pager called
-    assert pager.calls == [("1", "20240103000000")]
-    # SQL update executed once and commit called once
-    assert db.commits == 1
-    assert len(db.executed) == 1
-    sql, params = db.executed[0]
-    assert "UPDATE alerts" in sql
-    assert params[0] == "sent"  # status
-    assert params[2:] == ("1", "20240103000000")
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    r = router_mod.Router(db=FakeDB(conn), history=FakeHistory(), inference=FakeInference())
+
+    assert r.handle_message(b"x") == "AE"
+
+
+def test_handle_message_unknown_event_returns_aa(monkeypatch):
+    types = patch_hl7(monkeypatch)
+
+    def parse_event(_):
+        return types["UnknownEvent"]("ABC")
+
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    db = FakeDB(conn)
+    r = router_mod.Router(db=db, history=FakeHistory(), inference=FakeInference())
+
+    assert r.handle_message(b"x") == "AA"
+    assert db.updated == []
+
+
+def test_handle_message_admit_updates_patient(monkeypatch):
+    types = patch_hl7(monkeypatch)
+
+    def parse_event(_):
+        return types["AdmitEvent"](mrn="1", dob="20000101", sex="M", msg_time="20250101120000")
+
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    db = FakeDB(conn)
+    r = router_mod.Router(db=db, history=FakeHistory(), inference=FakeInference())
+
+    assert r.handle_message(b"x") == "AA"
+    assert db.updated == [
+        (
+            "1",
+            dict(is_admitted=True, dob="20000101", sex="M", admit_time="20250101120000"),
+        )
+    ]
+
+
+def test_handle_message_discharge_updates_patient(monkeypatch):
+    types = patch_hl7(monkeypatch)
+
+    def parse_event(_):
+        return types["DischargeEvent"](mrn="1", msg_time="20250102120000")
+
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    db = FakeDB(conn)
+    r = router_mod.Router(db=db, history=FakeHistory(), inference=FakeInference())
+
+    assert r.handle_message(b"x") == "AA"
+    assert db.updated == [("1", dict(is_admitted=False, discharge_time="20250102120000"))]
+
+
+def test_creatinine_duplicate_lab_skips_inference(monkeypatch):
+    types = patch_hl7(monkeypatch)
+    patch_date_to_ordinal(monkeypatch)
+
+    def parse_event(_):
+        return types["CreatinineEvent"](mrn="1", test_time="20250103120000", value=1.2)
+
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    db = FakeDB(conn)
+    db.insert_lab_return = False
+    inf = FakeInference(ready=True, should_page=True)
+    r = router_mod.Router(db=db, history=FakeHistory(), inference=inf)
+
+    assert r.handle_message(b"x") == "AA"
+    assert inf.calls == []
+    assert conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 0
+
+
+def test_creatinine_model_not_ready_skips_prediction(monkeypatch):
+    types = patch_hl7(monkeypatch)
+    patch_date_to_ordinal(monkeypatch)
+
+    def parse_event(_):
+        return types["CreatinineEvent"](mrn="1", test_time="20250103120000", value=1.2)
+
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    db = FakeDB(conn)
+    db.patient_state["1"] = dict(is_admitted=1, dob="20000101", sex="M")
+    inf = FakeInference(ready=False, should_page=True)
+    r = router_mod.Router(db=db, history=FakeHistory(history=[(9, 1.0), (10, 1.2)]), inference=inf)
+
+    assert r.handle_message(b"x") == "AA"
+    assert inf.calls == []
+    assert conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 0
+
+
+def test_creatinine_inference_crash_returns_ae(monkeypatch):
+    types = patch_hl7(monkeypatch)
+    patch_date_to_ordinal(monkeypatch)
+
+    def parse_event(_):
+        return types["CreatinineEvent"](mrn="1", test_time="20250103120000", value=1.2)
+
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    db = FakeDB(conn)
+    db.patient_state["1"] = dict(is_admitted=1, dob="20000101", sex="M")
+    inf = FakeInference(ready=True, crash=True)
+    r = router_mod.Router(db=db, history=FakeHistory(history=[(9, 1.0)]), inference=inf)
+
+    assert r.handle_message(b"x") == "AE"
+    assert conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 0
+
+
+def test_creatinine_suppressed_when_discharged(monkeypatch):
+    types = patch_hl7(monkeypatch)
+    patch_date_to_ordinal(monkeypatch)
+
+    def parse_event(_):
+        return types["CreatinineEvent"](mrn="1", test_time="20250103120000", value=1.2)
+
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    db = FakeDB(conn)
+    db.patient_state["1"] = dict(is_admitted=0, dob="20000101", sex="M")
+    inf = FakeInference(ready=True, should_page=True)
+    r = router_mod.Router(db=db, history=FakeHistory(history=[(9, 1.0)]), inference=inf)
+
+    assert r.handle_message(b"x") == "AA"
+    assert conn.execute("SELECT COUNT(*) FROM alerts").fetchone()[0] == 0
+
+
+def test_creatinine_dry_run_pages_sets_sent(monkeypatch):
+    types = patch_hl7(monkeypatch)
+    patch_date_to_ordinal(monkeypatch)
+
+    def parse_event(_):
+        return types["CreatinineEvent"](mrn="1", test_time="20250103120000", value=1.2)
+
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    db = FakeDB(conn)
+    db.patient_state["1"] = dict(is_admitted=1, dob="20000101", sex="M")
+    inf = FakeInference(ready=True, should_page=True)
+    r = router_mod.Router(db=db, history=FakeHistory(history=[(9, 1.0)]), inference=inf, pager=None)
+
+    assert r.handle_message(b"x") == "AA"
+    row = conn.execute(
+        "SELECT status, attempt_count FROM alerts WHERE mrn = ? AND test_time = ?",
+        ("1", "20250103120000"),
+    ).fetchone()
+    assert row == ("sent", 0)
+
+
+def test_creatinine_already_paged_once_per_mrn_suppresses_new_event(monkeypatch):
+    types = patch_hl7(monkeypatch)
+    patch_date_to_ordinal(monkeypatch)
+
+    def parse_event(_):
+        return types["CreatinineEvent"](mrn="1", test_time="20250104120000", value=1.3)
+
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    conn.execute(
+        "INSERT INTO alerts (mrn, test_time, status, attempt_count) VALUES (?, ?, 'sent', 1)",
+        ("1", "20250103120000"),
+    )
+    conn.commit()
+
+    db = FakeDB(conn)
+    db.patient_state["1"] = dict(is_admitted=1, dob="20000101", sex="M")
+    inf = FakeInference(ready=True, should_page=True)
+    r = router_mod.Router(db=db, history=FakeHistory(history=[(9, 1.0)]), inference=inf)
+
+    assert r.handle_message(b"x") == "AA"
+    cnt = conn.execute("SELECT COUNT(*) FROM alerts WHERE mrn = ?", ("1",)).fetchone()[0]
+    assert cnt == 1
+
+
+def test_creatinine_claim_race_integrity_error_skips_send(monkeypatch):
+    types = patch_hl7(monkeypatch)
+    patch_date_to_ordinal(monkeypatch)
+
+    def parse_event(_):
+        return types["CreatinineEvent"](mrn="1", test_time="20250103120000", value=1.2)
+
+    monkeypatch.setattr(router_mod.hl7, "parse_event", parse_event, raising=True)
+
+    conn = make_conn()
+    conn.execute(
+        "INSERT INTO alerts (mrn, test_time, status, attempt_count) VALUES (?, ?, 'pending', 0)",
+        ("1", "20250103120000"),
+    )
+    conn.commit()
+
+    db = FakeDB(conn)
+    db.patient_state["1"] = dict(is_admitted=1, dob="20000101", sex="M")
+    inf = FakeInference(ready=True, should_page=True)
+    pager = FakePager(ok=True)
+    r = router_mod.Router(db=db, history=FakeHistory(history=[(9, 1.0)]), inference=inf, pager=pager)
+
+    assert r.handle_message(b"x") == "AA"
+    assert pager.calls == []
+
+
+def test_parse_hl7_timestamp(monkeypatch):
+    assert router_mod.Router.parse_hl7_timestamp("20250101").strftime("%Y-%m-%d") == "2025-01-01"
+    assert router_mod.Router.parse_hl7_timestamp("202501011230").strftime("%Y-%m-%d %H:%M") == "2025-01-01 12:30"
+    assert (
+        router_mod.Router.parse_hl7_timestamp("20250101123059").strftime("%Y-%m-%d %H:%M:%S")
+        == "2025-01-01 12:30:59"
+    )
+
+    with pytest.raises(ValueError):
+        router_mod.Router.parse_hl7_timestamp("2025-01-01")
+
+    with pytest.raises(ValueError):
+        router_mod.Router.parse_hl7_timestamp("2025010112")
+
+
+def test_normalize_to_iso(monkeypatch):
+    assert router_mod.Router.normalize_to_iso("2025-01-01 12:30") == "2025-01-01 12:30:00"
+    assert router_mod.Router.normalize_to_iso("2025-01-01 12:30:59") == "2025-01-01 12:30:59"
+    assert router_mod.Router.normalize_to_iso("2025-01-01T12:30:59Z") == "2025-01-01 12:30:59"
+    assert router_mod.Router.normalize_to_iso("20250101123059") == "2025-01-01 12:30:59"
