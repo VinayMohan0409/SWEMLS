@@ -117,7 +117,7 @@ def main():
         print(f"  {p}")
     
     if near_threshold:
-        print(f"\n⚠️  {len(near_threshold)} predictions are near the threshold boundary!")
+        print(f"\n WARNING  {len(near_threshold)} predictions are near the threshold boundary!")
         print("   These are most likely to flip between machines.")
     
     return 0
