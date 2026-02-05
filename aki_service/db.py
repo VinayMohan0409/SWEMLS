@@ -92,6 +92,19 @@ class Database:
         """, (mrn,)).fetchone()
         return row is not None
 
+    def insert_labs_bulk(self, rows: List[Tuple[str, str, float]]) -> int:
+        """Bulk insert labs efficiently. Duplicates ignored."""
+        if not rows:
+            return 0
+        conn = self._get_conn()
+        conn.executemany(
+            "INSERT OR IGNORE INTO labs (mrn, test_time, value) VALUES (?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+        return len(rows)
+
+
 
     def insert_lab(self, mrn: str, test_time: str, value: float) -> bool:
         """Returns True if new data was saved; False if duplicate."""

@@ -27,42 +27,46 @@ class HistoryStore:
         self.db = db 
     
     def load_history_csv(self, path: str) -> int:
-            p = Path(path)
-            if not p.exists():
-                return 0
-            
-            n = 0
-            with p.open("r", newline="") as f:
-                reader = csv.DictReader(f)
-                
-                # Get all column names once
-                fieldnames = reader.fieldnames or []
-                
-                # Dynamically find all creatinine column pairs
-                # Look for columns matching pattern: creatinine_date_N, creatinine_result_N
-                date_columns = sorted([
-                    col for col in fieldnames 
-                    if col.startswith("creatinine_date_")
-                ])
-                
-                for row in reader:
-                    mrn = row["mrn"].strip()
-                    
-                    # Process each date column dynamically
-                    for date_col in date_columns:
-                        # Extract the index (e.g., "creatinine_date_5" -> "5")
-                        idx = date_col.replace("creatinine_date_", "")
-                        result_col = f"creatinine_result_{idx}"
-                        
-                        if result_col in row and row[date_col] and row[result_col]:
-                            try:
-                                value = float(row[result_col])
-                                if self.db.insert_lab(mrn, row[date_col], value):
-                                    n += 1
-                            except (ValueError, TypeError):
-                                # Skip rows with invalid numeric values
-                                pass
-            return n
+        p = Path(path)
+        if not p.exists():
+            return 0
+
+        n = 0
+        batch: List[Tuple[str, str, float]] = []
+        batch_size = 5000
+
+        with p.open("r", newline="") as f:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            date_columns = sorted([c for c in fieldnames if c.startswith("creatinine_date_")])
+
+            for row in reader:
+                mrn = (row.get("mrn") or "").strip()
+                if not mrn:
+                    continue
+
+                for date_col in date_columns:
+                    idx = date_col.replace("creatinine_date_", "")
+                    result_col = f"creatinine_result_{idx}"
+                    d = row.get(date_col)
+                    v = row.get(result_col)
+                    if not d or not v:
+                        continue
+                    try:
+                        value = float(v)
+                    except (ValueError, TypeError):
+                        continue
+
+                    batch.append((mrn, d, value))
+                    if len(batch) >= batch_size:
+                        n += self.db.insert_labs_bulk(batch)
+                        batch.clear()
+
+        if batch:
+            n += self.db.insert_labs_bulk(batch)
+
+        return n
+
     
     def get_history_from_db(self, mrn: str) -> List[Tuple[int, float]]:
         """Fetches labs from DB and converts dates to ordinals for the model."""

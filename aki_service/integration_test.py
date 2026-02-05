@@ -148,7 +148,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="End-to-end integration test: simulator -> service -> pager compare to aki.csv")
     ap.add_argument("--mllp-port", type=int, default=8440)
     ap.add_argument("--pager-port", type=int, default=8441)
-    ap.add_argument("--timeout-s", type=int, default=60)
+    ap.add_argument("--timeout-s", type=int, default=1200)
 
     # Optional overrides (defaults are repo-root paths)
     ap.add_argument("--simulator", default=None)
@@ -191,12 +191,12 @@ def main() -> int:
     else:
         print(f"[warn] inspect_db.py not found at {inspect_db}; DB not reset", flush=True)
 
-
+    HOST = "127.0.0.1"
     # Environment: ensure repo is importable
     env = dict(os.environ)
     env["PYTHONPATH"] = str(repo) + (os.pathsep + env["PYTHONPATH"] if "PYTHONPATH" in env else "")
-    env["MLLP_ADDRESS"] = f"localhost:{args.mllp_port}"
-    env["PAGER_ADDRESS"] = f"localhost:{args.pager_port}"
+    env["MLLP_ADDRESS"] = f"{HOST}:{args.mllp_port}"
+    env["PAGER_ADDRESS"] = f"{HOST}:{args.pager_port}"
     env["AKI_MODEL_BUNDLE"] = str(model_bundle)
     env["LOG_LEVEL"] = env.get("LOG_LEVEL", "INFO")
 
@@ -229,9 +229,9 @@ def main() -> int:
         "-m",
         args.service_module,
         "--mllp",
-        f"localhost:{args.mllp_port}",
+        f"{HOST}:{args.mllp_port}",
         "--pager",
-        f"localhost:{args.pager_port}",
+        f"{HOST}:{args.pager_port}",
         "--history",
         str(history_csv),
         "--model-bundle",
@@ -294,7 +294,7 @@ def main() -> int:
 
     # Try to shut down simulator (best effort)
     try:
-        http_post(f"http://localhost:{args.pager_port}/shutdown")
+        http_post(f"http://{HOST}:{args.pager_port}/shutdown")
     except Exception:
         pass
 

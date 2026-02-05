@@ -60,6 +60,7 @@ def main() -> None:
         pager = PagerClient(host=host, port=port)
 
     # 3. Handle History (Imports CSV to SQL if necessary) 
+    log.info("loading history csv: %s", args.history)
     history = HistoryStore(db)
     n = history.load_history_csv(args.history)
     log.info("history loaded into database: rows processed=%d", n)
