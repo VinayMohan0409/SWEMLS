@@ -1,6 +1,7 @@
 FROM ubuntu:noble
 RUN apt-get update && DEBIAN_FRONTEND=noninteractive apt-get -yq install python3-pip python3-venv
 COPY simulator.py /simulator/
+RUN chmod +x /simulator/simulator.py
 COPY simulator_test.py /simulator/
 WORKDIR /simulator
 RUN python3 -m venv /simulator
