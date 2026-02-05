@@ -22,46 +22,54 @@ class HistoryStore:
     without changing parsing and inference layers.
     """
 
-    def __init__(self) -> None:
-        self._h: Dict[str, PatientHistory] = {}
-
-    def get(self, mrn: str) -> PatientHistory:
-        return self._h.setdefault(mrn, PatientHistory(creatinine=[]))
-
-    def add_creatinine(self, mrn: str, date_any: str, value: float) -> None:
-        d = date_to_ordinal_from_any(date_any)
-        if d is None:
-            return
-        ph = self.get(mrn)
-        ph.creatinine.append((d, float(value)))
-
+    def __init__(self, db) -> None:
+        # db connection
+        self.db = db 
+    
     def load_history_csv(self, path: str) -> int:
         p = Path(path)
         if not p.exists():
             return 0
+
         n = 0
+        batch: List[Tuple[str, str, float]] = []
+        batch_size = 5000
+
         with p.open("r", newline="") as f:
-            r = csv.DictReader(f)
-            for row in r:
+            reader = csv.DictReader(f)
+            fieldnames = reader.fieldnames or []
+            date_columns = sorted([c for c in fieldnames if c.startswith("creatinine_date_")])
+
+            for row in reader:
                 mrn = (row.get("mrn") or "").strip()
                 if not mrn:
                     continue
-                # collect all creatinine_date_k/result_k pairs
-                for k in range(0, 10_000):
-                    dk = f"creatinine_date_{k}"
-                    vk = f"creatinine_result_{k}"
-                    if dk not in row and vk not in row:
-                        # assume contiguous indices; break early
-                        if k > 0:
-                            break
-                    d = (row.get(dk) or "").strip()
-                    v = (row.get(vk) or "").strip()
+
+                for date_col in date_columns:
+                    idx = date_col.replace("creatinine_date_", "")
+                    result_col = f"creatinine_result_{idx}"
+                    d = row.get(date_col)
+                    v = row.get(result_col)
                     if not d or not v:
                         continue
                     try:
-                        vf = float(v)
-                    except ValueError:
+                        value = float(v)
+                    except (ValueError, TypeError):
                         continue
-                    self.add_creatinine(mrn, d, vf)
-                n += 1
+
+                    batch.append((mrn, d, value))
+                    if len(batch) >= batch_size:
+                        n += self.db.insert_labs_bulk(batch)
+                        batch.clear()
+
+        if batch:
+            n += self.db.insert_labs_bulk(batch)
+
         return n
+
+    
+    def get_history_from_db(self, mrn: str) -> List[Tuple[int, float]]:
+        """Fetches labs from DB and converts dates to ordinals for the model."""
+        raw_history = self.db.get_history(mrn)
+        # Convert the ISO/HL7 string from DB to the ordinal integer the model expects
+        return [(date_to_ordinal_from_any(ts), val) for ts, val in raw_history]
