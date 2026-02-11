@@ -3,11 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional, Sequence, Tuple
+import logging
 
 import torch
 
 from .model_compat import ModelBundle, load_bundle, parse_hl7_timestamp, predict_prob
 
+log = logging.getLogger("inference_service")
 
 @dataclass
 class Demographics:
@@ -28,7 +30,6 @@ class InferenceService:
     """Loads Vinay sklearn LR model (model.pt + threshold.pt) and runs per-event inference."""
 
     def __init__(self, *, bundle_path: Optional[str], device: str = "cpu") -> None:
-        # device kept for CLI compatibility; sklearn runs on CPU
         self.device = torch.device(device)
         self.bundle: Optional[ModelBundle] = None
         self.bundle_path = bundle_path
@@ -67,13 +68,9 @@ class InferenceService:
             sex=sex,
         )
         
-        # Round to 8 decimal places to ensure deterministic comparison across CPUs
-        # Different CPU architectures (Intel/AMD/ARM) can produce slightly different
-        # floating-point results for the same sklearn model, causing predictions
-        # at the boundary to flip between True/False non-deterministically.
         prob = round(prob, 8)
         threshold = round(float(self.bundle.threshold), 8)
         
         result = prob >= threshold
-        print(f"MRN: {mrn} | Prediction: {result} | Probability: {prob:.6f} | Threshold: {threshold:.6f} | History: {len(history_ord_vals)} entries")
+        log.info(f"MRN: {mrn} | Prediction: {result} | Probability: {prob:.6f} | Threshold: {threshold:.6f} | History: {len(history_ord_vals)} entries")
         return result

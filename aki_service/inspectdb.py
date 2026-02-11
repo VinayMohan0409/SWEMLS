@@ -1,8 +1,9 @@
 import sqlite3
 import os
 from pathlib import Path
+import sys
 
-
+# This is just a db query file for debugging purposes
 DB_PATH = Path(__file__).resolve().parents[1] / "aki_service.db"
 
 def clear_database(conn):
@@ -39,6 +40,5 @@ def inspect(reset=False):
 
 if __name__ == "__main__":
     # Change this to True if you want to wipe the data
-    import sys
     should_reset = "--reset" in sys.argv
     inspect(reset=should_reset)

@@ -60,10 +60,6 @@ def date_to_ordinal_from_any(value: str) -> Optional[int]:
 
 
 
-# ----------------------------
-# Vinay features (online)
-# Mirrors vinay_model.make_features(), but uses history list.
-# ----------------------------
 MAP_SEX = {"M": 1.0, "F": 0.0}
 
 
@@ -151,7 +147,7 @@ def build_vinay_features_from_history(
 
 
 # ----------------------------
-# sklearn pipeline loader (robust)
+# sklearn pipeline loader
 # ----------------------------
 def _load_sklearn_pipeline(model_path: Path) -> Any:
     """
@@ -175,7 +171,7 @@ def _load_sklearn_pipeline(model_path: Path) -> Any:
     except Exception:
         pass
 
-    # 3) torch.load (sometimes people torch.save(pipeline,...))
+    # 3) torch.load
     try:
         return torch.load(str(model_path), map_location="cpu")
     except Exception as e:
@@ -257,7 +253,7 @@ def _load_threshold(thr_path: Path) -> float:
 # ----------------------------
 @dataclass(frozen=True)
 class ModelBundle:
-    model: Any  # sklearn Pipeline
+    model: Any
     threshold: float
 
 
@@ -275,7 +271,7 @@ def load_bundle(path: str, device: torch.device) -> ModelBundle:
         model_path = p / "model.pt"
         thr_path = p / "threshold.pt"
     else:
-        # If user passes model.pt directly, find sibling threshold.pt
+        # If user passes model.pt directly, find threshold.pt
         model_path = p
         thr_path = p.with_name("threshold.pt")
 

@@ -11,7 +11,6 @@ from .model_compat import date_to_ordinal_from_any
 
 @dataclass
 class PatientHistory:
-    # list of (date_ordinal, value)
     creatinine: List[Tuple[int, float]]
 
 
@@ -23,7 +22,6 @@ class HistoryStore:
     """
 
     def __init__(self, db) -> None:
-        # db connection
         self.db = db 
     
     def load_history_csv(self, path: str) -> int:

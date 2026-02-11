@@ -1,6 +1,7 @@
 import sqlite3
 import logging
 from typing import List, Tuple, Optional
+import time
 
 from aki_service.pager import PagerClient
 
@@ -32,7 +33,7 @@ class Database:
                 check_same_thread=False  # Safe since we're single-threaded message processing
             )
             self._conn.execute("PRAGMA journal_mode=WAL;")
-            self._conn.execute("PRAGMA synchronous=NORMAL;")  # Good balance of safety/speed
+            self._conn.execute("PRAGMA synchronous=NORMAL;")
             self._conn.row_factory = sqlite3.Row
         return self._conn
     
@@ -173,7 +174,6 @@ class Database:
             """).fetchall()
             
             for row in failed:
-                import time
                 current_ts = time.strftime("%Y%m%d%H%M%S", time.gmtime())
                 
                 ok, _ = pager.send_page(row["mrn"], row["test_time"])
