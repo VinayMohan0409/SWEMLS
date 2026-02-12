@@ -68,10 +68,10 @@ def test_safe_float_handles_non_finite_and_bad():
     assert np.isnan(m._safe_float("nope"))
 
 
-def test_build_vinay_features_all_valid():
+def test_build_features_all_valid():
     # Full valid history gives full stats
     hist = [(1, 1.0), (2, 2.0), (3, 3.0)]
-    x = m.build_vinay_features_from_history(history_ord_vals=hist, age_years=10.0, sex="M")
+    x = m.build_features_from_history(history_ord_vals=hist, age_years=10.0, sex="M")
 
     assert x.shape == (12,)
     assert x[0] == 10.0
@@ -89,10 +89,10 @@ def test_build_vinay_features_all_valid():
     assert x[11] == 2.0  # rel change
 
 
-def test_build_vinay_features_with_nans_and_unknown_sex():
+def test_build_features_with_nans_and_unknown_sex():
     # Mixed history keeps baseline first finite and index last finite
     hist = [(1, 1.0), (2, "bad"), (3, 5.0)]
-    x = m.build_vinay_features_from_history(history_ord_vals=hist, age_years=40.0, sex="X")
+    x = m.build_features_from_history(history_ord_vals=hist, age_years=40.0, sex="X")
 
     assert x[2] == 2.0  # n tests
     assert x[3] == 1.0  # baseline

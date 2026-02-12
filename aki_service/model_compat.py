@@ -9,9 +9,7 @@ import numpy as np
 import torch
 
 
-# ----------------------------
-# HL7 / date helpers
-# ----------------------------
+########## HL7 / date helpers ##########
 def parse_hl7_timestamp(ts: str) -> datetime:
     """Parse HL7 timestamps that may omit seconds.
 
@@ -73,14 +71,14 @@ def _safe_float(x: Any) -> float:
     return float("nan")
 
 
-def build_vinay_features_from_history(
+def build_features_from_history(
     *,
     history_ord_vals: Sequence[Tuple[int, float]],
     age_years: float,
     sex: str,
 ) -> np.ndarray:
     """
-    Return shape (12,) features in the same order as vinay_model.make_features():
+    Return shape (12,) features in the same order as model.make_features():
       age
       sex_binary
       n_creatinine_tests
@@ -146,9 +144,8 @@ def build_vinay_features_from_history(
     return x
 
 
-# ----------------------------
-# sklearn pipeline loader
-# ----------------------------
+
+########## sklearn pipeline loader ##########
 def _load_sklearn_pipeline(model_path: Path) -> Any:
     """
     Load model.pt that was saved as an sklearn Pipeline.
@@ -198,6 +195,8 @@ def _load_threshold(thr_path: Path) -> float:
             if len(obj) == 1:
                 return float(next(iter(obj.values())))
             raise ValueError(f"threshold dict missing key: keys={list(obj.keys())}")
+        if isinstance(obj, torch.Tensor):
+            return round(obj.detach().cpu().double().item(), 5)
         if hasattr(obj, "item"):
             return float(obj.item())
         return float(obj)
@@ -248,9 +247,7 @@ def _load_threshold(thr_path: Path) -> float:
         raise RuntimeError(f"Failed to load threshold from {thr_path}: {e}") from e
 
 
-# ----------------------------
-# Public bundle API used by inference.py
-# ----------------------------
+########## Public bundle API used by inference.py ##########
 @dataclass(frozen=True)
 class ModelBundle:
     model: Any
@@ -259,7 +256,7 @@ class ModelBundle:
 
 def load_bundle(path: str, device: torch.device) -> ModelBundle:
     """
-    For your Vinay LR deployment, we treat `path` as:
+    For your LR deployment, we treat `path` as:
       - either /.../model.pt
       - or a directory containing model.pt and threshold.pt
 
@@ -292,9 +289,9 @@ def predict_prob(
     sex: str,
 ) -> float:
     """
-    Runs sklearn Pipeline predict_proba on Vinay features.
+    Runs sklearn Pipeline predict_proba on features.
     """
-    x = build_vinay_features_from_history(
+    x = build_features_from_history(
         history_ord_vals=history_ord_vals,
         age_years=age_years,
         sex=sex,

@@ -27,7 +27,7 @@ def compute_age_years(dob_yyyymmdd: str, at_hl7_ts: str) -> Optional[float]:
 
 
 class InferenceService:
-    """Loads Vinay sklearn LR model (model.pt + threshold.pt) and runs per-event inference."""
+    """Loads sklearn LR model (model.pt + threshold.pt) and runs per-event inference."""
 
     def __init__(self, *, bundle_path: Optional[str], device: str = "cpu") -> None:
         self.device = torch.device(device)

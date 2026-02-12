@@ -100,8 +100,8 @@ class Router:
                             )
                         except Exception:
                             log.exception("Inference crashed for MRN %s", ev.mrn)
-                            result = "AE"
                             should_page = False
+                            return "AE"
 
                         if ps_dict and ps_dict['is_admitted'] == 0:
                             should_page = False
