@@ -10,27 +10,26 @@ log = logging.getLogger("aki_service")
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
-        self._conn = None  # Single connection, reused
+        self._conn = None 
         self._init_db()
 
     def _get_conn(self):
         """
         Returns a SINGLE reusable connection.
         
-        Why this matters:
         - Each sqlite3.connect() creates a new "view" of the database
         - With WAL mode, a new connection might not see recent writes immediately
         - By reusing ONE connection, all reads see all previous writes
         
         This prevents non-deterministic behavior where:
         - insert_lab() writes with Connection A
-        - get_history() reads with Connection B (might miss the write!)
+        - get_history() reads with Connection B
         """
         if self._conn is None:
             self._conn = sqlite3.connect(
                 self.db_path, 
                 timeout=10,
-                check_same_thread=False  # Safe since we're single-threaded message processing
+                check_same_thread=False
             )
             self._conn.execute("PRAGMA journal_mode=WAL;")
             self._conn.execute("PRAGMA synchronous=NORMAL;")
