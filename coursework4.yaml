@@ -32,7 +32,7 @@ spec:
     spec:
       initContainers:
       - name: copy-hospital-history
-        image: imperialswemlsspring2026.azurecr.io/coursework4-history
+        image: imperialswemlsspring2026.azurecr.io/coursework6-history
         volumeMounts:
           - mountPath: "/data"
             name: hospital-history
@@ -51,9 +51,9 @@ spec:
 
         env:
         - name: MLLP_ADDRESS
-          value: peninsula-simulator.coursework4:8440
+          value: peninsula-simulator.coursework6:8440
         - name: PAGER_ADDRESS
-          value: peninsula-simulator.coursework4:8441
+          value: peninsula-simulator.coursework6:8441
         - name: PYTHONUNBUFFERED
           value: "1"
         - name: LOG_LEVEL
