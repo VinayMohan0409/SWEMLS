@@ -25,6 +25,10 @@ spec:
     metadata:
       labels:
         app: aki-detection
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
     spec:
       initContainers:
       - name: copy-hospital-history
@@ -56,6 +60,13 @@ spec:
           value: "INFO"
         - name: DB_PATH
           value: "/state/aki_service.db"
+        - name: METRICS_PORT
+          value: "8000"
+
+        ports:
+        - name: metrics
+          containerPort: 8000
+          protocol: TCP
 
         volumeMounts:
           - mountPath: "/data"
