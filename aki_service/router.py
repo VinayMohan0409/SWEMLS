@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -10,6 +9,14 @@ from .history import HistoryStore
 from .inference import Demographics, InferenceService
 from .pager import PagerClient
 from .model_compat import date_to_ordinal_from_any
+from .metrics import (
+    MESSAGES_RECEIVED,
+    BLOOD_TESTS_RECEIVED,
+    AKI_PREDICTIONS_TOTAL,
+    PAGER_REQUESTS_TOTAL,
+    MESSAGE_PROCESSING_LATENCY,
+    CREATININE_VALUE,
+)
 from datetime import datetime
 import time
 
@@ -56,26 +63,34 @@ class Router:
         except hl7.HL7ParseError as e:
             log.warning("parse_error: %s", e)
             result = "AE"
-            ev = None 
+            ev = None
+            MESSAGES_RECEIVED.labels(message_type="parse_error").inc()
 
         if ev:
             if isinstance(ev, hl7.UnknownEvent):
                 log.info("unknown_msg: %s", ev.msg_type)
                 result = "AA"
+                MESSAGES_RECEIVED.labels(message_type="unknown").inc()
 
             elif isinstance(ev, hl7.AdmitEvent):
                 self.db.update_patient(
                     ev.mrn, is_admitted=True, dob=ev.dob, sex=ev.sex, admit_time=ev.msg_time
                 )
                 result = "AA"
+                MESSAGES_RECEIVED.labels(message_type="admit").inc()
 
             elif isinstance(ev, hl7.DischargeEvent):
                 self.db.update_patient(
                     ev.mrn, is_admitted=False, discharge_time=ev.msg_time
                 )
                 result = "AA"
+                MESSAGES_RECEIVED.labels(message_type="discharge").inc()
 
             elif isinstance(ev, hl7.CreatinineEvent):
+                MESSAGES_RECEIVED.labels(message_type="creatinine").inc()
+                BLOOD_TESTS_RECEIVED.inc()
+                CREATININE_VALUE.observe(ev.value)
+
                 is_new = self.db.insert_lab(ev.mrn, ev.test_time, ev.value)
                 if not is_new:
                     log.debug("Duplicate lab for MRN %s; skipping.", ev.mrn)
@@ -104,6 +119,11 @@ class Router:
                             result = "AE"
                             #return "AE"
 
+                        # Record prediction metric
+                        AKI_PREDICTIONS_TOTAL.labels(
+                            result="positive" if should_page else "negative"
+                        ).inc()
+
                         if ps_dict and ps_dict['is_admitted'] == 0:
                             should_page = False
 
@@ -124,6 +144,9 @@ class Router:
                                 if self.pager and not self.dry_run_pager:
                                     ok, info = self.pager.send_page(ev.mrn, ev.test_time)
                                     status = "sent" if ok else "failed"
+                                    PAGER_REQUESTS_TOTAL.labels(
+                                        status="success" if ok else "error"
+                                    ).inc()
                                     conn.execute("UPDATE alerts SET status=?, attempt_count=1, last_attempt_time=? WHERE mrn=? AND test_time=?", (status, current_ts, ev.mrn, ev.test_time))
                                     conn.commit()
                                 else:
@@ -134,8 +157,9 @@ class Router:
                         result = "AA"
 
         # 3. Calculate latency and log before the single return
-        latency_ms = (time.perf_counter() - start_time) * 1000
-        log.info("Message processed in %.2f ms", latency_ms)
+        latency_s = time.perf_counter() - start_time
+        MESSAGE_PROCESSING_LATENCY.observe(latency_s)
+        log.info("Message processed in %.2f ms", latency_s * 1000)
         
         return result
     

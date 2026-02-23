@@ -1,9 +1,14 @@
 from __future__ import annotations
 
+import logging
 import socket
 import time
 from dataclasses import dataclass
 from typing import Iterable, List, Optional, Tuple
+
+from .metrics import MLLP_RECONNECTIONS, MLLP_READ_ERRORS, MLLP_CONNECTED
+
+log = logging.getLogger("aki_service.mllp")
 
 MLLP_START_OF_BLOCK = b"\x0b"
 MLLP_END_OF_BLOCK = b"\x1c"
@@ -122,11 +127,17 @@ class MLLPClient:
         def should_stop() -> bool:
             return bool(stop_event is not None and getattr(stop_event, "is_set", None) and stop_event.is_set())
 
+        first_connect = True
         while not should_stop():
             try:
                 with socket.create_connection(self.address, timeout=self.socket_timeout_s) as sock:
                     sock.settimeout(self.socket_timeout_s)
                     self.decoder.reset()
+                    MLLP_CONNECTED.set(1)
+                    if not first_connect:
+                        MLLP_RECONNECTIONS.inc()
+                        log.info("MLLP reconnected to %s:%d", *self.address)
+                    first_connect = False
                     while not should_stop():
                         try:
                             data = sock.recv(self.recv_buf)
@@ -136,6 +147,7 @@ class MLLPClient:
 
                         if not data:
                             # peer closed
+                            MLLP_CONNECTED.set(0)
                             break
 
                         frames = self.decoder.feed(data)
@@ -147,12 +159,18 @@ class MLLPClient:
                                 ack_code = "AE"
                             ack = frame_mllp(build_hl7_ack(ack_code=ack_code))
                             sock.sendall(ack)
-            except (OSError, MLLPDecodeError):
+            except (OSError, MLLPDecodeError) as e:
+                MLLP_CONNECTED.set(0)
+                MLLP_READ_ERRORS.inc()
+                log.warning("MLLP connection error: %s", e)
                 if should_stop():
                     break
+                first_connect = False
                 time.sleep(self.reconnect_backoff_s)
                 continue
 
             # clean close: reconnect after a short backoff (useful for simulator replay)
             if not should_stop():
+                MLLP_CONNECTED.set(0)
                 time.sleep(self.reconnect_backoff_s)
+

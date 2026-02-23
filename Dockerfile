@@ -20,5 +20,8 @@ COPY model /app/model
 
 ENV PYTHONUNBUFFERED=1
 
+# Expose Prometheus metrics port
+EXPOSE 8000
+
 # Grader will provide MLLP_ADDRESS and PAGER_ADDRESS
 CMD ["python", "-m", "aki_service"]

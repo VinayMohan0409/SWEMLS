@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import argparse
 import logging
 import os
@@ -13,6 +12,7 @@ from .mllp import MLLPClient
 from .pager import PagerClient
 from .router import Router
 from .db import Database
+from .metrics import start_metrics_server
 
 
 def parse_hostport(s: str) -> Tuple[str, int]:
@@ -31,6 +31,7 @@ def main() -> None:
     ap.add_argument("--device", default=os.environ.get("AKI_DEVICE", "cpu"), help="torch device (cpu)")
     ap.add_argument("--dry-run-pager", action="store_true", help="Do not send POSTs to pager (log only)")
     ap.add_argument("--log-level", default=os.environ.get("LOG_LEVEL", "INFO"))
+    ap.add_argument("--metrics-port", type=int, default=int(os.environ.get("METRICS_PORT", "8000")), help="Port for Prometheus metrics HTTP server")
     ap.add_argument("--db", default=os.environ.get("DB_PATH", "aki_service.db"), help="Path to SQLite database")
     args = ap.parse_args()
 
@@ -42,6 +43,10 @@ def main() -> None:
 
     # 1. Initialize the Database
     db = Database(args.db)
+
+    # Start Prometheus metrics server
+    start_metrics_server(args.metrics_port)
+    log.info("Prometheus metrics server started on port %d", args.metrics_port)
 
     stop_event = threading.Event()
 
