@@ -1,5 +1,6 @@
 from __future__ import annotations
 import logging
+from math import inf
 import sqlite3
 from dataclasses import dataclass
 from typing import Dict, Optional, Set, Tuple
@@ -137,21 +138,37 @@ class Router:
                         if should_page:
                             # Paging execution
                             current_ts = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+
                             try:
                                 conn.execute("INSERT INTO alerts (mrn, test_time, status, attempt_count) VALUES (?, ?, 'pending', 0)", (ev.mrn, ev.test_time))
                                 conn.commit()
                                 
                                 if self.pager and not self.dry_run_pager:
-                                    ok, info = self.pager.send_page(ev.mrn, ev.test_time)
-                                    status = "sent" if ok else "failed"
-                                    PAGER_REQUESTS_TOTAL.labels(
-                                        status="success" if ok else "error"
-                                    ).inc()
-                                    conn.execute("UPDATE alerts SET status=?, attempt_count=1, last_attempt_time=? WHERE mrn=? AND test_time=?", (status, current_ts, ev.mrn, ev.test_time))
-                                    conn.commit()
+                                    max_retries = 3
+                                    ok = False
+                                    for attempt in range(1, max_retries + 1):
+                                        ok, info = self.pager.send_page(ev.mrn, ev.test_time)
+                                        current_ts = time.strftime("%Y%m%d%H%M%S", time.gmtime())
+                                        if ok:
+                                            PAGER_REQUESTS_TOTAL.labels(status="success").inc()
+                                            conn.execute("UPDATE alerts SET status='sent', attempt_count=?, last_attempt_time=? WHERE mrn=? AND test_time=?",
+                                                         (attempt, current_ts, ev.mrn, ev.test_time))
+                                            conn.commit()
+                                            break
+                                        else:
+                                            PAGER_REQUESTS_TOTAL.labels(status="error").inc()
+                                            conn.execute("UPDATE alerts SET status='failed', attempt_count=?, last_attempt_time=? WHERE mrn=? AND test_time=?",
+                                                         (attempt, current_ts, ev.mrn, ev.test_time))
+                                            conn.commit()
+                                            log.warning("Pager attempt %d/%d failed for MRN %s: %s", attempt, max_retries, ev.mrn, info)
+                                            if attempt < max_retries:
+                                                time.sleep(1 * attempt)
+                                    if not ok:
+                                        log.error("Pager FAILED after %d attempts for MRN %s", max_retries, ev.mrn)
                                 else:
-                                    conn.execute("UPDATE alerts SET status='sent' WHERE mrn=? AND test_time=?", (ev.mrn, ev.test_time))
-                                    conn.commit()
+                                    # dry-run: do NOT mark as 'sent'
+                                    pass 
+
                             except sqlite3.IntegrityError:
                                 pass
                         result = "AA"
