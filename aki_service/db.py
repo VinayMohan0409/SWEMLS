@@ -165,11 +165,12 @@ class Database:
     def retry_failed_alerts(self, pager: PagerClient) -> int:
         count = 0
         with self._get_conn() as conn:
-            # Only retry alerts that haven't failed too many times (e.g., max 3 attempts)
+            # Retry alerts that are 'failed' (pager returned error) or 'pending'
+            # (pod was killed between INSERT and pager call). Cap at 3 attempts.
             failed = conn.execute("""
                 SELECT mrn, test_time, attempt_count 
                 FROM alerts 
-                WHERE status = 'failed' AND attempt_count < 3
+                WHERE status IN ('failed', 'pending') AND attempt_count < 3
             """).fetchall()
             
             for row in failed:

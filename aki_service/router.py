@@ -129,19 +129,17 @@ class Router:
                             should_page = False
 
                         if should_page:
-                            # Check if already paged
-                            conn = self.db._get_conn()
-                            already = conn.execute("SELECT 1 FROM alerts WHERE mrn=? AND status='sent' LIMIT 1", (ev.mrn,)).fetchone()
-                            if already:
+                            # Check if already paged during THIS admission
+                            if self.db.has_alert_for_current_admission(ev.mrn):
                                 should_page = False
 
                         if should_page:
                             # Paging execution
                             current_ts = time.strftime("%Y%m%d%H%M%S", time.gmtime())
-
                             try:
+                                conn = self.db._get_conn()
                                 conn.execute("INSERT INTO alerts (mrn, test_time, status, attempt_count) VALUES (?, ?, 'pending', 0)", (ev.mrn, ev.test_time))
-                                conn.commit()
+                                conn.commit()   
                                 
                                 if self.pager and not self.dry_run_pager:
                                     max_retries = 3
@@ -166,8 +164,11 @@ class Router:
                                     if not ok:
                                         log.error("Pager FAILED after %d attempts for MRN %s", max_retries, ev.mrn)
                                 else:
-                                    # dry-run: do NOT mark as 'sent'
-                                    pass 
+                                    # Dry-run: log only, clean up the pending record
+                                    # so it doesn't get retried for real on next startup
+                                    log.info("dry_run_pager: would page MRN %s at %s", ev.mrn, ev.test_time)
+                                    conn.execute("DELETE FROM alerts WHERE mrn=? AND test_time=?", (ev.mrn, ev.test_time))
+                                    conn.commit()
 
                             except sqlite3.IntegrityError:
                                 pass
