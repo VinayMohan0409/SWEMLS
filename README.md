@@ -35,7 +35,7 @@ The repository contains 91 unit-test functions covering HL7 parsing, MLLP framin
 
 An integration harness starts the included simulator and the real service, captures pager events, compares them with `aki.csv`, checks acknowledgement failures, and computes precision, recall, and F3. Separate scripts exercise deterministic predictions across repeated runs.
 
-These tests are provided as code; this README does not claim a current pass rate because no CI result is committed.
+The suite is designed for local execution and covers both isolated components and the complete simulator-to-alert path.
 
 ## Repository layout
 
@@ -132,6 +132,6 @@ docker run --rm --network=host \
   aki-service
 ```
 
-## Scope
+## Engineering highlights
 
-This project is not a large-model training run. It demonstrates the systems work needed to serve an ML model against a streaming clinical event source: protocol boundaries, persistent state, idempotency, recovery, deterministic preprocessing, and honest end-to-end evaluation.
+The project demonstrates the systems work required to serve an ML model against a streaming clinical event source: protocol boundaries, persistent state, idempotency, recovery, deterministic preprocessing, and end-to-end evaluation.
